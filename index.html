@@ -11,222 +11,195 @@
     <!-- Cannon.js for Bonelab-style Physics -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
     
-    <!-- Firebase for Phone-to-PC connection -->
+    <!-- Firebase for Multi-Device connection -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Environment variables
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-            // Add your own fallback firebase config here if running outside the platform
-        };
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'diy-vr-sandbox';
+        // Environment setup
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'diy-vr-sandbox-html';
 
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // State variables
+        // State
         let user = null;
-        let isHost = false;
         let roomCode = "";
-        
-        // 3D Variables
+        let currentRole = ""; // 'host', 'headset', 'left', 'right'
+        let lastSyncTime = 0;
+        const SYNC_INTERVAL = 50; // Sync to Firebase every 50ms to prevent rate limiting
+
+        // 3D & Physics
         let scene, camera, renderer, world;
         let physicsBodies = [];
         let renderMeshes = [];
-        let leftControllerMesh, rightControllerMesh;
+        let leftHandBody, rightHandBody;
+        let leftHandMesh, rightHandMesh;
 
-        // UI Elements
+        // UI
         const menuUI = document.getElementById('menu-ui');
-        const gameUI = document.getElementById('game-ui');
-        const statusText = document.getElementById('status-text');
+        const hostUI = document.getElementById('host-ui');
+        const clientUI = document.getElementById('client-ui');
 
-        // 1. Initialize Auth First (MANDATORY)
+        // 1. Initialize Auth
         async function initAuth() {
             try {
-                await signInAnonymously(auth);
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
             } catch (e) {
                 console.error("Auth failed:", e);
-                alert("Failed to connect to servers.");
+                document.getElementById('status-text').innerText = "Network Error.";
             }
         }
 
         onAuthStateChanged(auth, (u) => {
             user = u;
             if(user) {
-                document.getElementById('btn-host').disabled = false;
-                document.getElementById('btn-join').disabled = false;
-                statusText.innerText = "Connected to servers. Ready.";
+                document.querySelectorAll('.role-btn').forEach(btn => btn.disabled = false);
+                document.getElementById('status-text').innerText = "Connected. Select a role.";
             }
         });
 
         initAuth();
 
-        // --- BUTTON HANDLERS ---
+        // --- UI EVENT LISTENERS ---
         document.getElementById('btn-host').addEventListener('click', () => {
-            isHost = true;
+            currentRole = 'host';
             roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-            setupHostRoom();
+            startHost();
         });
 
-        document.getElementById('btn-join').addEventListener('click', () => {
-            isHost = false;
+        const joinWithRole = (role) => {
             roomCode = document.getElementById('room-input').value;
             if(roomCode.length === 4) {
-                joinRoom();
+                currentRole = role;
+                startClientDevice();
             } else {
-                alert("Please enter a 4 digit code.");
+                alert("Enter the 4-digit code shown on the Host PC.");
             }
-        });
+        };
+
+        document.getElementById('btn-headset').addEventListener('click', () => joinWithRole('headset'));
+        document.getElementById('btn-left').addEventListener('click', () => joinWithRole('left'));
+        document.getElementById('btn-right').addEventListener('click', () => joinWithRole('right'));
 
         // --- HOST (PC) LOGIC ---
-        async function setupHostRoom() {
+        async function startHost() {
             if (!user) return;
             menuUI.classList.add('hidden');
-            gameUI.classList.remove('hidden');
-            document.getElementById('host-overlay').classList.remove('hidden');
+            hostUI.classList.remove('hidden');
             document.getElementById('display-code').innerText = roomCode;
 
-            // Create room in Firestore
+            // Initialize room
             const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'vrsessions_' + roomCode);
             await setDoc(roomRef, {
                 hostId: user.uid,
-                headsetReady: false,
-                headsetRotation: { x: 0, y: 0, z: 0, w: 1 }
+                headset: { x: 0, y: 0, z: 0, w: 1 },
+                left: { x: 0, y: 0, z: 0, w: 1 },
+                right: { x: 0, y: 0, z: 0, w: 1 }
             });
 
-            init3DPhysics();
-            
-            // Listen for headset rotation from phone
+            init3D();
+
+            // Listen for data from phones
             onSnapshot(roomRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    if (data.headsetReady) {
-                        document.getElementById('host-overlay').innerText = "Headset Connected! Look at your phone.";
-                        // Apply phone rotation to PC camera
-                        if(data.headsetRotation && camera) {
-                            camera.quaternion.set(
-                                data.headsetRotation.x,
-                                data.headsetRotation.y,
-                                data.headsetRotation.z,
-                                data.headsetRotation.w
-                            );
-                        }
-                    }
+                if (!docSnap.exists() || !camera) return;
+                const data = docSnap.data();
+
+                // Apply Headset Rotation
+                if (data.headset) {
+                    camera.quaternion.set(data.headset.x, data.headset.y, data.headset.z, data.headset.w);
                 }
-            }, (error) => console.error("Snapshot error:", error));
+                
+                // Apply Left Controller Rotation (Kinematic Physics Body)
+                if (data.left && leftHandBody) {
+                    leftHandBody.quaternion.set(data.left.x, data.left.y, data.left.z, data.left.w);
+                }
 
-            // Connect to local Python bridge for ESP32 controllers
-            connectLocalControllers();
+                // Apply Right Controller Rotation (Kinematic Physics Body)
+                if (data.right && rightHandBody) {
+                    rightHandBody.quaternion.set(data.right.x, data.right.y, data.right.z, data.right.w);
+                }
+            }, (err) => console.error(err));
         }
 
-        function connectLocalControllers() {
-            // This connects to the python script running on the PC
-            const ws = new WebSocket('ws://localhost:8080');
-            ws.onopen = () => console.log("Connected to local controller bridge.");
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    // Update controller 1
-                    if(data.c1 && leftControllerMesh) {
-                        // Very basic mapping of gyro to rotation
-                        leftControllerMesh.rotation.set(data.c1.gx * 0.01, data.c1.gy * 0.01, data.c1.gz * 0.01);
-                    }
-                    if(data.c2 && rightControllerMesh) {
-                        rightControllerMesh.rotation.set(data.c2.gx * 0.01, data.c2.gy * 0.01, data.c2.gz * 0.01);
-                    }
-                } catch(e){}
-            };
-            ws.onerror = () => console.log("Make sure Python bridge is running for controllers!");
-        }
-
-
-        // --- HEADSET (PHONE) LOGIC ---
-        async function joinRoom() {
+        // --- CLIENT (PHONE) LOGIC ---
+        async function startClientDevice() {
             if (!user) return;
-            
             const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'vrsessions_' + roomCode);
             const snap = await getDoc(roomRef);
             
-            if (snap.exists()) {
-                menuUI.classList.add('hidden');
-                
-                // Request gyroscope permissions (required on iOS)
-                if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                    try {
-                        const permissionState = await DeviceOrientationEvent.requestPermission();
-                        if (permissionState === 'granted') {
-                            startPhoneVR(roomRef);
-                        } else {
-                            alert("Gyroscope access required for VR.");
-                        }
-                    } catch (e) {
-                        console.error(e);
-                    }
-                } else {
-                    // Non-iOS or older Android
-                    startPhoneVR(roomRef);
-                }
-            } else {
-                alert("Room not found!");
+            if (!snap.exists()) {
+                alert("Room not found! Check the code.");
+                return;
             }
-        }
 
-        function startPhoneVR(roomRef) {
-            // Set ready flag
-            setDoc(roomRef, { headsetReady: true }, { merge: true });
+            // Request Gyro Permissions (iOS requirement)
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState !== 'granted') {
+                        alert("Gyroscope access is required.");
+                        return;
+                    }
+                } catch (e) { console.error(e); }
+            }
 
-            // On phone, we just show a black screen or split view, and send gyro data
-            document.body.innerHTML = `
-                <div class="fixed inset-0 bg-black flex flex-col items-center justify-center text-white">
-                    <h1 class="text-2xl font-bold text-green-500">VR Mode Active</h1>
-                    <p class="mt-4">Keep phone in headset.</p>
-                    <p class="text-xs text-gray-500 mt-8">Code: ${roomCode}</p>
-                </div>
-            `;
+            menuUI.classList.add('hidden');
+            clientUI.classList.remove('hidden');
+            document.getElementById('client-role-display').innerText = `Active: ${currentRole.toUpperCase()}`;
 
-            // Setup local Three.js just to handle the complex Euler->Quaternion math easily
-            const dummyCamera = new THREE.PerspectiveCamera();
+            // Local 3D math helpers for Euler to Quaternion conversion
             const euler = new THREE.Euler(0,0,0, 'YXZ');
             const quaternion = new THREE.Quaternion();
 
             window.addEventListener('deviceorientation', (event) => {
+                const now = Date.now();
+                if (now - lastSyncTime < SYNC_INTERVAL) return; // Throttle to prevent database crash
+                
                 let alpha = event.alpha ? THREE.MathUtils.degToRad(event.alpha) : 0; // Z
-                let beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0; // X'
-                let gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0; // Y''
+                let beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0; // X
+                let gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0; // Y
 
-                // Convert phone orientation to 3D world quaternion
                 euler.set(beta, alpha, -gamma, 'YXZ');
                 quaternion.setFromEuler(euler);
 
-                // Throttle updates to Firebase slightly to prevent throttling issues
-                // In a real production app, WebRTC data channels are used instead of Firestore
-                setDoc(roomRef, {
-                    headsetRotation: {
-                        x: quaternion.x,
-                        y: quaternion.y,
-                        z: quaternion.z,
-                        w: quaternion.w
-                    }
-                }, { merge: true });
+                // Build the update payload based on what device this is
+                const updatePayload = {};
+                updatePayload[currentRole] = {
+                    x: quaternion.x,
+                    y: quaternion.y,
+                    z: quaternion.z,
+                    w: quaternion.w
+                };
+
+                setDoc(roomRef, updatePayload, { merge: true });
+                lastSyncTime = now;
             });
         }
 
-
         // --- 3D & PHYSICS ENGINE (HOST ONLY) ---
-        function init3DPhysics() {
+        function init3D() {
             // Three.js Scene Setup
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB); // Sky blue
-            scene.add(new THREE.AmbientLight(0x404040));
-            const light = new THREE.DirectionalLight(0xffffff, 1);
-            light.position.set(10, 20, 10);
+            scene.background = new THREE.Color(0x222222);
+            
+            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x444444);
+            scene.add(gridHelper);
+
+            const light = new THREE.DirectionalLight(0xffffff, 1.2);
+            light.position.set(5, 10, 5);
             scene.add(light);
+            scene.add(new THREE.AmbientLight(0x404040));
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 1.6, 0); // Average human height
+            camera.position.set(0, 1.6, 0); // Stand at 1.6m height
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -238,58 +211,64 @@
             world.broadphase = new CANNON.NaiveBroadphase();
             world.solver.iterations = 10;
 
-            // Ground
-            const groundMat = new CANNON.Material();
-            const groundBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: groundMat });
+            // Ground Physics
+            const groundBody = new CANNON.Body({ 
+                mass: 0, 
+                shape: new CANNON.Plane(),
+                material: new CANNON.Material({ friction: 0.1, restitution: 0.1 })
+            });
             groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
             world.addBody(groundBody);
-            
-            const groundMesh = new THREE.Mesh(
-                new THREE.PlaneGeometry(50, 50),
-                new THREE.MeshStandardMaterial({ color: 0x555555 })
-            );
-            groundMesh.rotation.x = -Math.PI / 2;
-            scene.add(groundMesh);
 
-            // Spawn "Bonelab" style stackable boxes
-            for(let i=0; i<20; i++) {
-                createPhysicsBox(
-                    Math.random() * 4 - 2, 
+            // Create Physics Boxes (The "Bonelab" playground)
+            for(let i=0; i<15; i++) {
+                spawnBox(
+                    Math.random() * 2 - 1, 
                     2 + i * 1.5, 
-                    Math.random() * -4 - 2
+                    Math.random() * -3 - 1
                 );
             }
 
-            // Create mock hands (Controllers)
-            const handGeo = new THREE.BoxGeometry(0.1, 0.1, 0.2);
-            const handMatL = new THREE.MeshStandardMaterial({ color: 0xff0000 });
-            const handMatR = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+            // Create Kinematic Hands
+            // Left Hand (Red)
+            const handShape = new CANNON.Box(new CANNON.Vec3(0.05, 0.05, 0.15));
+            leftHandBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: handShape });
+            leftHandBody.position.set(-0.3, 1.4, -0.5); // Fixed offset from camera
+            world.addBody(leftHandBody);
             
-            leftControllerMesh = new THREE.Mesh(handGeo, handMatL);
-            leftControllerMesh.position.set(-0.3, 1.2, -0.5);
-            scene.add(leftControllerMesh);
+            leftHandMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.1, 0.1, 0.3),
+                new THREE.MeshStandardMaterial({ color: 0xff4444 })
+            );
+            scene.add(leftHandMesh);
 
-            rightControllerMesh = new THREE.Mesh(handGeo, handMatR);
-            rightControllerMesh.position.set(0.3, 1.2, -0.5);
-            scene.add(rightControllerMesh);
+            // Right Hand (Blue)
+            rightHandBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: handShape });
+            rightHandBody.position.set(0.3, 1.4, -0.5); // Fixed offset from camera
+            world.addBody(rightHandBody);
 
-            // Start loop
+            rightHandMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.1, 0.1, 0.3),
+                new THREE.MeshStandardMaterial({ color: 0x4444ff })
+            );
+            scene.add(rightHandMesh);
+
+            // Start Render Loop
             animate();
         }
 
-        function createPhysicsBox(x, y, z) {
-            const size = 0.5;
-            // Physics
+        function spawnBox(x, y, z) {
+            const size = 0.4;
             const shape = new CANNON.Box(new CANNON.Vec3(size/2, size/2, size/2));
             const body = new CANNON.Body({ mass: 1, shape: shape });
             body.position.set(x, y, z);
             world.addBody(body);
             physicsBodies.push(body);
 
-            // Graphics
-            const geometry = new THREE.BoxGeometry(size, size, size);
-            const material = new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff });
-            const mesh = new THREE.Mesh(geometry, material);
+            const mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(size, size, size),
+                new THREE.MeshStandardMaterial({ color: 0xeeeeee })
+            );
             scene.add(mesh);
             renderMeshes.push(mesh);
         }
@@ -298,18 +277,29 @@
         function animate() {
             requestAnimationFrame(animate);
 
-            // Step Physics
+            // Step Physics Engine
             world.step(timeStep);
 
-            // Sync Physics to Graphics
+            // Sync Physics Bodies to 3D Meshes
             for(let i=0; i<physicsBodies.length; i++) {
                 renderMeshes[i].position.copy(physicsBodies[i].position);
                 renderMeshes[i].quaternion.copy(physicsBodies[i].quaternion);
             }
 
+            // Sync Kinematic Hands to Meshes
+            if(leftHandBody && leftHandMesh) {
+                leftHandMesh.position.copy(leftHandBody.position);
+                leftHandMesh.quaternion.copy(leftHandBody.quaternion);
+            }
+            if(rightHandBody && rightHandMesh) {
+                rightHandMesh.position.copy(rightHandBody.position);
+                rightHandMesh.quaternion.copy(rightHandBody.quaternion);
+            }
+
             renderer.render(scene, camera);
         }
 
+        // Handle Resizing
         window.addEventListener('resize', () => {
             if(camera && renderer) {
                 camera.aspect = window.innerWidth / window.innerHeight;
@@ -319,40 +309,67 @@
         });
     </script>
 </head>
-<body class="bg-gray-900 overflow-hidden font-sans">
+<body class="bg-gray-900 overflow-hidden font-sans select-none">
 
-    <!-- UI Overlay -->
+    <!-- MAIN MENU -->
     <div id="menu-ui" class="fixed inset-0 flex items-center justify-center bg-gray-900 text-white z-50">
-        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md text-center">
-            <h1 class="text-3xl font-bold mb-2">DIY VR Sandbox</h1>
-            <p id="status-text" class="text-sm text-yellow-400 mb-8">Connecting to network...</p>
+        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md mx-4">
+            <h1 class="text-3xl font-bold mb-2 text-center text-indigo-400">DIY VR Simulator</h1>
+            <p id="status-text" class="text-sm text-yellow-400 mb-6 text-center">Initializing Database...</p>
             
-            <div class="space-y-6">
-                <div class="p-4 border border-gray-600 rounded-lg">
-                    <h2 class="text-xl font-semibold mb-2">Play on PC</h2>
-                    <p class="text-xs text-gray-400 mb-4">Host the physics engine on this device.</p>
-                    <button id="btn-host" disabled class="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 py-3 rounded font-bold transition">
-                        Start as Host
-                    </button>
-                </div>
+            <!-- Host Controls -->
+            <div class="mb-6 pb-6 border-b border-gray-700">
+                <h2 class="text-lg font-semibold mb-1">Step 1: Start PC Host</h2>
+                <p class="text-xs text-gray-400 mb-3">Run the physics engine on your computer screen.</p>
+                <button id="btn-host" disabled class="role-btn w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
+                    Start Host Console
+                </button>
+            </div>
 
-                <div class="p-4 border border-gray-600 rounded-lg">
-                    <h2 class="text-xl font-semibold mb-2">Use as Headset</h2>
-                    <p class="text-xs text-gray-400 mb-4">Enter the code shown on your PC.</p>
-                    <input id="room-input" type="number" placeholder="4-Digit Code" class="w-full bg-gray-700 text-center text-2xl py-2 rounded mb-4 focus:outline-none focus:ring-2 focus:ring-green-500">
-                    <button id="btn-join" disabled class="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-600 py-3 rounded font-bold transition">
-                        Connect Phone
+            <!-- Client Controls -->
+            <div>
+                <h2 class="text-lg font-semibold mb-1">Step 2: Connect Devices</h2>
+                <p class="text-xs text-gray-400 mb-3">Open this URL on your phones to act as your VR gear.</p>
+                
+                <input id="room-input" type="number" placeholder="Enter 4-Digit Code" class="w-full bg-gray-700 text-center text-xl py-3 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                
+                <div class="grid grid-cols-1 gap-2">
+                    <button id="btn-headset" disabled class="role-btn w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
+                        Connect as Headset (Phone 1)
                     </button>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button id="btn-left" disabled class="role-btn bg-red-600 hover:bg-red-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
+                            Left Hand (Phone 2)
+                        </button>
+                        <button id="btn-right" disabled class="role-btn bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
+                            Right Hand (Phone 3)
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <div id="game-ui" class="hidden fixed top-4 left-4 z-40 text-white drop-shadow-md pointer-events-none">
-        <div id="host-overlay" class="hidden bg-black/50 p-4 rounded-lg backdrop-blur-sm">
-            <p class="text-sm uppercase tracking-wider text-gray-300">Room Code</p>
-            <h2 id="display-code" class="text-5xl font-mono font-bold text-green-400">----</h2>
-            <p class="text-xs mt-2 text-gray-300">Open this app on your phone and enter this code.</p>
+    <!-- HOST OVERLAY (PC) -->
+    <div id="host-ui" class="hidden fixed top-4 left-4 z-40 text-white drop-shadow-md pointer-events-none">
+        <div class="bg-black/60 p-5 rounded-xl backdrop-blur-md border border-gray-700">
+            <p class="text-xs uppercase tracking-wider text-gray-400 font-bold">Session Code</p>
+            <h2 id="display-code" class="text-6xl font-mono font-bold text-indigo-400 my-1">----</h2>
+            <p class="text-sm text-gray-300">Enter this code on your mobile devices.</p>
+        </div>
+    </div>
+
+    <!-- CLIENT OVERLAY (PHONE) -->
+    <div id="client-ui" class="hidden fixed inset-0 bg-black flex flex-col items-center justify-center text-white z-50">
+        <div class="text-center p-8 border-2 border-dashed border-gray-700 rounded-2xl">
+            <h1 id="client-role-display" class="text-3xl font-bold text-emerald-500 mb-4">Active Device</h1>
+            <p class="text-gray-400">This phone is streaming gyroscope data.</p>
+            
+            <div class="mt-12 animate-pulse">
+                <svg class="w-12 h-12 mx-auto text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                </svg>
+            </div>
         </div>
     </div>
 
