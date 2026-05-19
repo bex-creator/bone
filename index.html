@@ -3,383 +3,771 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>DIY VR Physics Sandbox</title>
+    <title>Pass & Play Telephone</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- Three.js for 3D Graphics -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <!-- Cannon.js for Bonelab-style Physics -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
-    
-    <!-- Firebase for Multi-Device connection -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap');
 
-        // Environment setup
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-            apiKey: "AIzaSyCN9lkBMMTaEk8FR4TKgBqcvDkVFtnDUrk",
-            authDomain: "weblox-1f8b0.firebaseapp.com",
-            projectId: "weblox-1f8b0",
-            storageBucket: "weblox-1f8b0.firebasestorage.app",
-            messagingSenderId: "765567900101",
-            appId: "1:765567900101:web:fa03494970c3019f1e93ac",
-            measurementId: "G-D7E2MT985J"
-        };
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'diy-vr-sandbox-html';
-
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-
-        // State
-        let user = null;
-        let roomCode = "";
-        let currentRole = ""; // 'host', 'headset', 'left', 'right'
-        let lastSyncTime = 0;
-        const SYNC_INTERVAL = 50; // Sync to Firebase every 50ms to prevent rate limiting
-
-        // 3D & Physics
-        let scene, camera, renderer, world;
-        let physicsBodies = [];
-        let renderMeshes = [];
-        let leftHandBody, rightHandBody;
-        let leftHandMesh, rightHandMesh;
-
-        // UI
-        const menuUI = document.getElementById('menu-ui');
-        const hostUI = document.getElementById('host-ui');
-        const clientUI = document.getElementById('client-ui');
-
-        // 1. Initialize Auth
-        async function initAuth() {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (e) {
-                console.error("Auth failed:", e);
-                document.getElementById('status-text').innerText = "Network Error.";
-            }
+        body {
+            font-family: 'Fredoka', sans-serif;
+            background-color: #6366f1;
+            background-image: radial-gradient(circle at center, #818cf8 0%, #4f46e5 100%);
+            color: white;
+            touch-action: manipulation;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
-        onAuthStateChanged(auth, (u) => {
-            user = u;
-            if(user) {
-                document.querySelectorAll('.role-btn').forEach(btn => btn.disabled = false);
-                document.getElementById('status-text').innerText = "Connected. Select a role.";
-            }
-        });
-
-        initAuth();
-
-        // --- UI EVENT LISTENERS ---
-        document.getElementById('btn-host').addEventListener('click', () => {
-            currentRole = 'host';
-            roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-            startHost();
-        });
-
-        const joinWithRole = (role) => {
-            roomCode = document.getElementById('room-input').value;
-            if(roomCode.length === 4) {
-                currentRole = role;
-                startClientDevice();
-            } else {
-                alert("Enter the 4-digit code shown on the Host PC.");
-            }
-        };
-
-        document.getElementById('btn-headset').addEventListener('click', () => joinWithRole('headset'));
-        document.getElementById('btn-left').addEventListener('click', () => joinWithRole('left'));
-        document.getElementById('btn-right').addEventListener('click', () => joinWithRole('right'));
-
-        // --- HOST (PC) LOGIC ---
-        async function startHost() {
-            if (!user) return;
-            menuUI.classList.add('hidden');
-            hostUI.classList.remove('hidden');
-            document.getElementById('display-code').innerText = roomCode;
-
-            // Initialize room
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'vrsessions_' + roomCode);
-            await setDoc(roomRef, {
-                hostId: user.uid,
-                headset: { x: 0, y: 0, z: 0, w: 1 },
-                left: { x: 0, y: 0, z: 0, w: 1 },
-                right: { x: 0, y: 0, z: 0, w: 1 }
-            });
-
-            init3D();
-
-            // Listen for data from phones
-            onSnapshot(roomRef, (docSnap) => {
-                if (!docSnap.exists() || !camera) return;
-                const data = docSnap.data();
-
-                // Apply Headset Rotation
-                if (data.headset) {
-                    camera.quaternion.set(data.headset.x, data.headset.y, data.headset.z, data.headset.w);
-                }
-                
-                // Apply Left Controller Rotation (Kinematic Physics Body)
-                if (data.left && leftHandBody) {
-                    leftHandBody.quaternion.set(data.left.x, data.left.y, data.left.z, data.left.w);
-                }
-
-                // Apply Right Controller Rotation (Kinematic Physics Body)
-                if (data.right && rightHandBody) {
-                    rightHandBody.quaternion.set(data.right.x, data.right.y, data.right.z, data.right.w);
-                }
-            }, (err) => console.error(err));
+        /* Prevent overscroll on mobile */
+        html, body {
+            overflow: hidden;
+            height: 100%;
+            width: 100%;
         }
 
-        // --- CLIENT (PHONE) LOGIC ---
-        async function startClientDevice() {
-            if (!user) return;
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'vrsessions_' + roomCode);
-            const snap = await getDoc(roomRef);
-            
-            if (!snap.exists()) {
-                alert("Room not found! Check the code.");
-                return;
-            }
-
-            // Request Gyro Permissions (iOS requirement)
-            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                try {
-                    const permissionState = await DeviceOrientationEvent.requestPermission();
-                    if (permissionState !== 'granted') {
-                        alert("Gyroscope access is required.");
-                        return;
-                    }
-                } catch (e) { console.error(e); }
-            }
-
-            menuUI.classList.add('hidden');
-            clientUI.classList.remove('hidden');
-            document.getElementById('client-role-display').innerText = `Active: ${currentRole.toUpperCase()}`;
-
-            // Local 3D math helpers for Euler to Quaternion conversion
-            const euler = new THREE.Euler(0,0,0, 'YXZ');
-            const quaternion = new THREE.Quaternion();
-
-            window.addEventListener('deviceorientation', (event) => {
-                const now = Date.now();
-                if (now - lastSyncTime < SYNC_INTERVAL) return; // Throttle to prevent database crash
-                
-                let alpha = event.alpha ? THREE.MathUtils.degToRad(event.alpha) : 0; // Z
-                let beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0; // X
-                let gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0; // Y
-
-                euler.set(beta, alpha, -gamma, 'YXZ');
-                quaternion.setFromEuler(euler);
-
-                // Build the update payload based on what device this is
-                const updatePayload = {};
-                updatePayload[currentRole] = {
-                    x: quaternion.x,
-                    y: quaternion.y,
-                    z: quaternion.z,
-                    w: quaternion.w
-                };
-
-                setDoc(roomRef, updatePayload, { merge: true });
-                lastSyncTime = now;
-            });
+        .view {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+            width: 100%;
+            padding: 1rem;
+            max-width: 800px;
+            margin: 0 auto;
         }
 
-        // --- 3D & PHYSICS ENGINE (HOST ONLY) ---
-        function init3D() {
-            // Three.js Scene Setup
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x222222);
-            
-            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x444444);
-            scene.add(gridHelper);
-
-            const light = new THREE.DirectionalLight(0xffffff, 1.2);
-            light.position.set(5, 10, 5);
-            scene.add(light);
-            scene.add(new THREE.AmbientLight(0x404040));
-
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 1.6, 0); // Stand at 1.6m height
-
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-
-            // Cannon.js Physics World Setup
-            world = new CANNON.World();
-            world.gravity.set(0, -9.82, 0);
-            world.broadphase = new CANNON.NaiveBroadphase();
-            world.solver.iterations = 10;
-
-            // Ground Physics
-            const groundBody = new CANNON.Body({ 
-                mass: 0, 
-                shape: new CANNON.Plane(),
-                material: new CANNON.Material({ friction: 0.1, restitution: 0.1 })
-            });
-            groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
-            world.addBody(groundBody);
-
-            // Create Physics Boxes (The "Bonelab" playground)
-            for(let i=0; i<15; i++) {
-                spawnBox(
-                    Math.random() * 2 - 1, 
-                    2 + i * 1.5, 
-                    Math.random() * -3 - 1
-                );
-            }
-
-            // Create Kinematic Hands
-            // Left Hand (Red)
-            const handShape = new CANNON.Box(new CANNON.Vec3(0.05, 0.05, 0.15));
-            leftHandBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: handShape });
-            leftHandBody.position.set(-0.3, 1.4, -0.5); // Fixed offset from camera
-            world.addBody(leftHandBody);
-            
-            leftHandMesh = new THREE.Mesh(
-                new THREE.BoxGeometry(0.1, 0.1, 0.3),
-                new THREE.MeshStandardMaterial({ color: 0xff4444 })
-            );
-            scene.add(leftHandMesh);
-
-            // Right Hand (Blue)
-            rightHandBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape: handShape });
-            rightHandBody.position.set(0.3, 1.4, -0.5); // Fixed offset from camera
-            world.addBody(rightHandBody);
-
-            rightHandMesh = new THREE.Mesh(
-                new THREE.BoxGeometry(0.1, 0.1, 0.3),
-                new THREE.MeshStandardMaterial({ color: 0x4444ff })
-            );
-            scene.add(rightHandMesh);
-
-            // Start Render Loop
-            animate();
+        .view.active {
+            display: flex;
         }
 
-        function spawnBox(x, y, z) {
-            const size = 0.4;
-            const shape = new CANNON.Box(new CANNON.Vec3(size/2, size/2, size/2));
-            const body = new CANNON.Body({ mass: 1, shape: shape });
-            body.position.set(x, y, z);
-            world.addBody(body);
-            physicsBodies.push(body);
-
-            const mesh = new THREE.Mesh(
-                new THREE.BoxGeometry(size, size, size),
-                new THREE.MeshStandardMaterial({ color: 0xeeeeee })
-            );
-            scene.add(mesh);
-            renderMeshes.push(mesh);
+        .btn {
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+        .btn:active {
+            transform: translateY(4px);
+            box-shadow: 0 0px 0px rgba(0,0,0,0.2) !important;
         }
 
-        const timeStep = 1 / 60;
-        function animate() {
-            requestAnimationFrame(animate);
-
-            // Step Physics Engine
-            world.step(timeStep);
-
-            // Sync Physics Bodies to 3D Meshes
-            for(let i=0; i<physicsBodies.length; i++) {
-                renderMeshes[i].position.copy(physicsBodies[i].position);
-                renderMeshes[i].quaternion.copy(physicsBodies[i].quaternion);
-            }
-
-            // Sync Kinematic Hands to Meshes
-            if(leftHandBody && leftHandMesh) {
-                leftHandMesh.position.copy(leftHandBody.position);
-                leftHandMesh.quaternion.copy(leftHandBody.quaternion);
-            }
-            if(rightHandBody && rightHandMesh) {
-                rightHandMesh.position.copy(rightHandBody.position);
-                rightHandMesh.quaternion.copy(rightHandBody.quaternion);
-            }
-
-            renderer.render(scene, camera);
+        canvas {
+            touch-action: none;
+            cursor: crosshair;
+            background-color: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
 
-        // Handle Resizing
-        window.addEventListener('resize', () => {
-            if(camera && renderer) {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            }
-        });
-    </script>
+        .color-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 3px solid transparent;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .color-btn.selected {
+            border-color: #374151;
+            transform: scale(1.1);
+        }
+
+        /* Fun entrance animation */
+        @keyframes popIn {
+            0% { transform: scale(0.9); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-pop {
+            animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        
+        /* Gallery scrollable area */
+        #gallery-scroll {
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+    </style>
+    <!-- Add PeerJS for WebRTC Peer-to-Peer networking -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
-<body class="bg-gray-900 overflow-hidden font-sans select-none">
+<body>
 
-    <!-- MAIN MENU -->
-    <div id="menu-ui" class="fixed inset-0 flex items-center justify-center bg-gray-900 text-white z-50">
-        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md mx-4">
-            <h1 class="text-3xl font-bold mb-2 text-center text-indigo-400">DIY VR Simulator</h1>
-            <p id="status-text" class="text-sm text-yellow-400 mb-6 text-center">Initializing Database...</p>
+    <!-- 1. SETUP VIEW -->
+    <div id="view-setup" class="view active items-center justify-center animate-pop text-center">
+        <h1 class="text-5xl font-bold mb-2 text-yellow-300 drop-shadow-md">Sketch & Guess</h1>
+        <p class="text-indigo-100 mb-8 font-semibold">Online Multiplayer via WebRTC!</p>
+
+        <div class="bg-white/10 backdrop-blur-md p-6 rounded-3xl w-full max-w-md shadow-xl border border-white/20">
+            <input type="text" id="player-name-input" placeholder="Your Name" class="w-full mb-4 px-4 py-3 rounded-xl text-gray-800 font-semibold focus:outline-none focus:ring-4 focus:ring-yellow-300" autocomplete="off" maxlength="15">
             
-            <!-- Host Controls -->
-            <div class="mb-6 pb-6 border-b border-gray-700">
-                <h2 class="text-lg font-semibold mb-1">Step 1: Start PC Host</h2>
-                <p class="text-xs text-gray-400 mb-3">Run the physics engine on your computer screen.</p>
-                <button id="btn-host" disabled class="role-btn w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
-                    Start Host Console
-                </button>
+            <button id="create-room-btn" class="w-full bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xl px-6 py-4 rounded-xl shadow-[0_6px_0_#3730a3] btn mb-6">
+                Host New Game
+            </button>
+
+            <div class="relative flex items-center py-2 mb-4">
+                <div class="flex-grow border-t border-white/30"></div>
+                <span class="flex-shrink-0 mx-4 text-white/70 font-semibold text-sm">OR</span>
+                <div class="flex-grow border-t border-white/30"></div>
             </div>
 
-            <!-- Client Controls -->
-            <div>
-                <h2 class="text-lg font-semibold mb-1">Step 2: Connect Devices</h2>
-                <p class="text-xs text-gray-400 mb-3">Open this URL on your phones to act as your VR gear.</p>
-                
-                <input id="room-input" type="number" placeholder="Enter 4-Digit Code" class="w-full bg-gray-700 text-center text-xl py-3 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                
-                <div class="grid grid-cols-1 gap-2">
-                    <button id="btn-headset" disabled class="role-btn w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
-                        Connect as Headset (Phone 1)
-                    </button>
-                    <div class="grid grid-cols-2 gap-2">
-                        <button id="btn-left" disabled class="role-btn bg-red-600 hover:bg-red-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
-                            Left Hand (Phone 2)
-                        </button>
-                        <button id="btn-right" disabled class="role-btn bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 py-3 rounded-lg font-bold transition">
-                            Right Hand (Phone 3)
-                        </button>
+            <div class="flex gap-2">
+                <input type="text" id="room-code-input" placeholder="Room Code" class="flex-1 px-4 py-3 rounded-xl text-gray-800 font-bold uppercase tracking-widest focus:outline-none focus:ring-4 focus:ring-yellow-300" autocomplete="off" maxlength="5">
+                <button id="join-room-btn" class="bg-yellow-400 hover:bg-yellow-300 text-yellow-900 font-bold px-6 py-3 rounded-xl shadow-[0_6px_0_#b45309] btn">Join</button>
+            </div>
+            
+            <p id="connection-status" class="text-yellow-300 font-bold mt-4 h-6"></p>
+        </div>
+    </div>
+
+    <!-- 2. LOBBY VIEW -->
+    <div id="view-lobby" class="view items-center justify-center animate-pop text-center">
+        <div class="bg-white/10 backdrop-blur-md p-8 rounded-3xl w-full max-w-md shadow-xl border border-white/20">
+            <h2 class="text-indigo-100 font-bold mb-1 tracking-widest text-sm uppercase">Room Code</h2>
+            <div id="lobby-room-code" class="bg-indigo-900/50 text-yellow-300 text-5xl font-mono font-bold py-4 px-8 rounded-2xl mb-8 cursor-pointer hover:bg-indigo-800 transition-colors inline-block tracking-widest shadow-inner border border-indigo-400/50" onclick="copyRoomCode()">
+                ----
+            </div>
+            
+            <h3 class="text-xl font-bold mb-3 text-left text-white">Players:</h3>
+            <ul id="player-list" class="space-y-2 mb-8 max-h-48 overflow-y-auto text-left">
+                <!-- Players will be injected here -->
+            </ul>
+
+            <button id="start-game-btn" class="hidden w-full bg-green-500 hover:bg-green-400 text-white font-bold text-xl px-6 py-4 rounded-xl shadow-[0_6px_0_#166534] btn">
+                Start Game
+            </button>
+            <p id="wait-host-msg" class="hidden text-yellow-300 font-bold animate-pulse text-lg">Waiting for host to start...</p>
+        </div>
+    </div>
+
+    <!-- 3. WAITING VIEW -->
+    <div id="view-waiting" class="view items-center justify-center animate-pop text-center">
+        <h2 class="text-4xl font-bold mb-6 text-yellow-300 drop-shadow-md">Hang Tight!</h2>
+        <div class="w-20 h-20 border-4 border-indigo-200 border-t-yellow-300 rounded-full animate-spin mx-auto mb-8"></div>
+        <p id="wait-text" class="text-2xl text-indigo-100 font-semibold mb-4">Waiting for others to finish...</p>
+        <p id="wait-count" class="text-3xl font-bold text-white bg-indigo-900/50 px-8 py-3 rounded-full inline-block border border-indigo-500/30">0 / 0 Ready</p>
+    </div>
+
+    <!-- 4. TEXT ACTION VIEW (Prompting / Guessing) -->
+    <div id="view-text" class="view justify-center animate-pop">
+        <div class="flex-1 flex flex-col items-center justify-center w-full max-w-lg mx-auto">
+            <div id="text-instruction" class="text-3xl font-bold mb-6 text-yellow-300 text-center drop-shadow-md">
+                What should they draw?
+            </div>
+
+            <div id="text-image-container" class="hidden mb-6 w-full max-w-sm bg-white p-2 rounded-2xl shadow-xl rotate-1">
+                <img id="text-reference-image" src="" alt="Drawing to guess" class="w-full rounded-xl pointer-events-none">
+            </div>
+
+            <textarea id="text-input" rows="3" placeholder="Type your idea here..." class="w-full p-4 rounded-2xl text-gray-800 text-xl font-semibold shadow-inner focus:outline-none focus:ring-4 focus:ring-yellow-400 resize-none mb-6"></textarea>
+
+            <button id="submit-text-btn" class="w-full bg-yellow-400 hover:bg-yellow-300 text-yellow-900 font-bold text-2xl px-6 py-4 rounded-xl shadow-[0_6px_0_#b45309] btn">
+                Submit!
+            </button>
+        </div>
+    </div>
+
+    <!-- 5. DRAW ACTION VIEW -->
+    <div id="view-draw" class="view flex-col animate-pop relative">
+        <div class="flex flex-col h-full bg-white/10 backdrop-blur-sm p-2 rounded-3xl border border-white/20">
+            <div class="bg-indigo-900 text-white rounded-2xl p-4 mb-2 shadow-lg text-center border-2 border-indigo-400 relative overflow-hidden">
+                <span class="text-sm font-bold text-indigo-300 uppercase tracking-wider block mb-1">Draw This:</span>
+                <h2 id="draw-prompt-text" class="text-2xl md:text-3xl font-bold">...</h2>
+            </div>
+
+            <div id="canvas-container" class="flex-1 relative w-full rounded-2xl overflow-hidden bg-white mb-2 border-4 border-indigo-200">
+                <canvas id="drawing-canvas"></canvas>
+            </div>
+
+            <div class="bg-white rounded-2xl p-3 shadow-lg border-2 border-indigo-100">
+                <div class="flex justify-between items-center mb-3">
+                    <div class="flex gap-2 flex-wrap justify-center w-full" id="color-palette"></div>
+                </div>
+                <div class="flex justify-between items-center gap-4">
+                    <div class="flex gap-2 items-center bg-gray-100 p-2 rounded-xl">
+                        <button class="size-btn p-1 rounded-full bg-gray-300 hover:bg-gray-400 transition-colors" data-size="3"><div class="w-2 h-2 bg-gray-800 rounded-full mx-auto"></div></button>
+                        <button class="size-btn p-1 rounded-full bg-gray-300 hover:bg-gray-400 transition-colors" data-size="8"><div class="w-4 h-4 bg-gray-800 rounded-full mx-auto"></div></button>
+                        <button class="size-btn p-1 rounded-full bg-gray-300 hover:bg-gray-400 transition-colors ring-2 ring-indigo-500" data-size="15"><div class="w-6 h-6 bg-gray-800 rounded-full mx-auto"></div></button>
                     </div>
+
+                    <button id="clear-canvas-btn" class="text-gray-500 hover:text-red-500 font-bold px-3 py-2 rounded-xl hover:bg-red-50 transition-colors">
+                        🗑️ Clear
+                    </button>
+                    
+                    <button id="submit-draw-btn" class="bg-green-500 hover:bg-green-400 text-white font-bold px-8 py-3 rounded-xl shadow-[0_4px_0_#166534] btn ml-auto">
+                        Submit!
+                    </button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- HOST OVERLAY (PC) -->
-    <div id="host-ui" class="hidden fixed top-4 left-4 z-40 text-white drop-shadow-md pointer-events-none">
-        <div class="bg-black/60 p-5 rounded-xl backdrop-blur-md border border-gray-700">
-            <p class="text-xs uppercase tracking-wider text-gray-400 font-bold">Session Code</p>
-            <h2 id="display-code" class="text-6xl font-mono font-bold text-indigo-400 my-1">----</h2>
-            <p class="text-sm text-gray-300">Enter this code on your mobile devices.</p>
-        </div>
-    </div>
-
-    <!-- CLIENT OVERLAY (PHONE) -->
-    <div id="client-ui" class="hidden fixed inset-0 bg-black flex flex-col items-center justify-center text-white z-50">
-        <div class="text-center p-8 border-2 border-dashed border-gray-700 rounded-2xl">
-            <h1 id="client-role-display" class="text-3xl font-bold text-emerald-500 mb-4">Active Device</h1>
-            <p class="text-gray-400">This phone is streaming gyroscope data.</p>
+    <!-- 6. GALLERY VIEW -->
+    <div id="view-gallery" class="view flex-col animate-pop">
+        <h1 class="text-4xl font-bold text-center mb-6 text-yellow-300 drop-shadow-md">The Results!</h1>
+        
+        <div id="gallery-scroll" class="flex-1 bg-white text-gray-800 rounded-3xl p-4 md:p-8 shadow-2xl relative">
+            <h2 id="album-title" class="text-3xl font-extrabold text-indigo-600 mb-6 text-center border-b-4 border-indigo-100 pb-4">Album</h2>
             
-            <div class="mt-12 animate-pulse">
-                <svg class="w-12 h-12 mx-auto text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
-                </svg>
+            <div id="album-content" class="space-y-8 pb-24">
+                <!-- Chain items injected here -->
+            </div>
+
+            <!-- Fixed bottom navigation for gallery -->
+            <div id="gallery-controls" class="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-white via-white to-transparent pt-12 rounded-b-3xl flex justify-between hidden">
+                <button id="prev-album-btn" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold px-6 py-3 rounded-xl btn shadow-[0_4px_0_#9ca3af] invisible">
+                    Previous
+                </button>
+                <button id="next-album-btn" class="bg-indigo-500 hover:bg-indigo-400 text-white font-bold px-8 py-3 rounded-xl btn shadow-[0_4px_0_#3730a3]">
+                    Next Album
+                </button>
+            </div>
+            
+            <div id="gallery-wait" class="absolute bottom-6 left-0 right-0 text-center font-bold text-gray-400 hidden uppercase tracking-widest text-sm">
+                Waiting for host to navigate...
             </div>
         </div>
     </div>
 
+    <script>
+        /**
+         * ONLINE MULTIPLAYER TELEPHONE (WEBRTC P2P)
+         */
+
+        // --- GLOBAL NETWORK & GAME STATE ---
+        let peer = null;
+        let myId = null;
+        let myName = "";
+        let isHost = false;
+        
+        // Client variables
+        let hostConn = null;
+        let currentChainId = 0;
+        
+        // Host variables
+        let clients = {}; // { peerId: { conn: object, name: string } }
+        let players = []; // [ { id, name } ]
+        let gameChains = []; // [ [ { author, type, content } ] ]
+        let currentTurn = 0;
+        let submissionsThisTurn = 0;
+        let currentViewingAlbum = 0;
+
+        // --- DOM ELEMENTS ---
+        const views = {
+            setup: document.getElementById('view-setup'),
+            lobby: document.getElementById('view-lobby'),
+            waiting: document.getElementById('view-waiting'),
+            text: document.getElementById('view-text'),
+            draw: document.getElementById('view-draw'),
+            gallery: document.getElementById('view-gallery')
+        };
+        const statusText = document.getElementById('connection-status');
+
+        function showView(viewName) {
+            Object.values(views).forEach(v => v.classList.remove('active'));
+            views[viewName].classList.add('active');
+            window.scrollTo(0, 0);
+        }
+
+        // --- ROOM CODE UTILS ---
+        function generateRoomCode() {
+            return Math.random().toString(36).substring(2, 7).toUpperCase();
+        }
+
+        function copyRoomCode() {
+            const el = document.getElementById('lobby-room-code');
+            const code = el.innerText;
+            if (code === "COPIED!") return;
+
+            const textArea = document.createElement("textarea");
+            textArea.value = code;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                el.innerText = "COPIED!";
+                setTimeout(() => el.innerText = code, 1500);
+            } catch (err) {
+                console.error('Copy failed', err);
+            }
+            document.body.removeChild(textArea);
+        }
+
+        // --- NETWORK INITIALIZATION ---
+
+        document.getElementById('create-room-btn').addEventListener('click', () => {
+            myName = document.getElementById('player-name-input').value.trim() || 'Host';
+            isHost = true;
+            statusText.textContent = "Creating room...";
+            
+            const code = generateRoomCode();
+            peer = new Peer(code);
+
+            peer.on('open', (id) => {
+                myId = id;
+                players = [{ id: myId, name: myName }];
+                document.getElementById('lobby-room-code').innerText = id;
+                updateLobbyUI();
+                showView('lobby');
+            });
+
+            peer.on('connection', (conn) => {
+                conn.on('open', () => {
+                    clients[conn.peer] = { conn: conn, name: 'Joining...' };
+                });
+                conn.on('data', (data) => handleHostData(conn.peer, data));
+                conn.on('close', () => {
+                    players = players.filter(p => p.id !== conn.peer);
+                    delete clients[conn.peer];
+                    broadcast({ type: 'lobby_update', players });
+                    updateLobbyUI();
+                });
+            });
+
+            peer.on('error', (err) => {
+                if (err.type === 'unavailable-id') {
+                    peer.destroy();
+                    statusText.textContent = "Code collision. Try again.";
+                } else {
+                    statusText.textContent = "Error: " + err.message;
+                }
+            });
+        });
+
+        document.getElementById('join-room-btn').addEventListener('click', () => {
+            myName = document.getElementById('player-name-input').value.trim() || 'Player';
+            const roomCode = document.getElementById('room-code-input').value.trim().toUpperCase();
+            if (!roomCode) return;
+            
+            isHost = false;
+            statusText.textContent = "Connecting to room...";
+            
+            peer = new Peer();
+            peer.on('open', (id) => {
+                myId = id;
+                hostConn = peer.connect(roomCode);
+                
+                hostConn.on('open', () => {
+                    document.getElementById('lobby-room-code').innerText = roomCode;
+                    hostConn.send({ type: 'join', name: myName });
+                    showView('lobby');
+                });
+                
+                hostConn.on('data', handleClientData);
+                
+                hostConn.on('close', () => {
+                    alert("Disconnected from host.");
+                    window.location.reload();
+                });
+            });
+
+            peer.on('error', (err) => {
+                statusText.textContent = "Error: Could not connect to room.";
+            });
+        });
+
+        // --- HOST LOGIC ---
+
+        function handleHostData(peerId, data) {
+            if (data.type === 'join') {
+                clients[peerId].name = data.name;
+                players.push({ id: peerId, name: data.name });
+                broadcast({ type: 'lobby_update', players });
+                updateLobbyUI();
+            }
+            if (data.type === 'submit_turn') {
+                gameChains[data.chainId].push({
+                    author: players.find(p => p.id === peerId).name,
+                    type: data.turnType,
+                    content: data.content
+                });
+                submissionsThisTurn++;
+                broadcast({ type: 'wait_update', count: submissionsThisTurn, total: players.length });
+                updateWaitingUI(submissionsThisTurn, players.length);
+                
+                if (submissionsThisTurn === players.length) {
+                    advanceTurn();
+                }
+            }
+        }
+
+        function broadcast(msg) {
+            Object.values(clients).forEach(c => {
+                if (c.conn.open) c.conn.send(msg);
+            });
+        }
+
+        document.getElementById('start-game-btn').addEventListener('click', () => {
+            if(players.length < 2) return; // Need at least 2
+            
+            gameChains = players.map(() => []);
+            currentTurn = 0;
+            submissionsThisTurn = 0;
+            
+            players.forEach((p, idx) => {
+                let msg = { 
+                    type: 'start_turn', 
+                    chainId: idx, 
+                    turnType: 'text', 
+                    instruction: 'Write a secret prompt for someone to draw:',
+                    reference: null
+                };
+                if (p.id === myId) handleClientData(msg); // host's own client handler
+                else clients[p.id].conn.send(msg);
+            });
+        });
+
+        function advanceTurn() {
+            currentTurn++;
+            submissionsThisTurn = 0;
+            
+            if (currentTurn >= players.length) {
+                // Game Over!
+                broadcast({ type: 'game_over', chains: gameChains });
+                currentViewingAlbum = 0;
+                showView('gallery');
+                renderAlbum(0);
+                broadcast({ type: 'show_album', index: 0 });
+                return;
+            }
+            
+            broadcast({ type: 'wait_update', count: 0, total: players.length });
+            updateWaitingUI(0, players.length);
+            
+            // Assign next tasks simultaneously 
+            players.forEach((p, idx) => {
+                const chainId = (idx + currentTurn) % players.length;
+                const chain = gameChains[chainId];
+                const prevItem = chain[chain.length - 1];
+                
+                let msg = { type: 'start_turn', chainId: chainId };
+                if (prevItem.type === 'text') {
+                    msg.turnType = 'draw';
+                    msg.instruction = prevItem.content;
+                } else {
+                    msg.turnType = 'text';
+                    msg.instruction = "What is this a drawing of?";
+                    msg.reference = prevItem.content;
+                }
+                
+                if (p.id === myId) handleClientData(msg);
+                else clients[p.id].conn.send(msg);
+            });
+        }
+
+        // --- CLIENT LOGIC ---
+
+        function handleClientData(data) {
+            if (data.type === 'lobby_update') {
+                players = data.players;
+                updateLobbyUI();
+            }
+            if (data.type === 'start_turn') {
+                currentChainId = data.chainId;
+                if (data.turnType === 'text') {
+                    prepareTextAction(data.instruction, data.reference);
+                } else {
+                    prepareDrawAction(data.instruction);
+                }
+            }
+            if (data.type === 'wait_update') {
+                updateWaitingUI(data.count, data.total);
+            }
+            if (data.type === 'game_over') {
+                gameChains = data.chains;
+                showView('waiting');
+                document.getElementById('wait-text').textContent = "Host is preparing the gallery...";
+            }
+            if (data.type === 'show_album') {
+                renderAlbum(data.index);
+                showView('gallery');
+            }
+            if (data.type === 'back_to_lobby') {
+                showView('lobby');
+            }
+        }
+
+        function submitTurn(type, content) {
+            showView('waiting');
+            let msg = { type: 'submit_turn', chainId: currentChainId, turnType: type, content: content };
+            if (isHost) handleHostData(myId, msg);
+            else hostConn.send(msg);
+        }
+
+        // --- UI UPDATES ---
+
+        function updateLobbyUI() {
+            const list = document.getElementById('player-list');
+            list.innerHTML = '';
+            players.forEach((p, i) => {
+                const li = document.createElement('li');
+                li.className = 'bg-white/20 px-4 py-2 rounded-lg font-bold flex justify-between items-center';
+                li.innerHTML = `<span>${p.name} ${i === 0 ? '👑' : ''}</span>`;
+                list.appendChild(li);
+            });
+            
+            if (isHost) {
+                const btn = document.getElementById('start-game-btn');
+                btn.classList.remove('hidden');
+                btn.disabled = players.length < 2;
+                btn.textContent = players.length < 2 ? "Need at least 2 players" : "Start Game";
+                document.getElementById('wait-host-msg').classList.add('hidden');
+            } else {
+                document.getElementById('start-game-btn').classList.add('hidden');
+                document.getElementById('wait-host-msg').classList.remove('hidden');
+            }
+        }
+
+        function updateWaitingUI(count, total) {
+            document.getElementById('wait-count').textContent = `${count} / ${total} Ready`;
+            document.getElementById('wait-text').textContent = "Waiting for others to finish...";
+        }
+
+        // --- TEXT ACTION LOGIC ---
+        
+        function prepareTextAction(instruction, imageUrl) {
+            document.getElementById('text-instruction').textContent = instruction;
+            const textInput = document.getElementById('text-input');
+            const imgContainer = document.getElementById('text-image-container');
+            
+            textInput.value = '';
+            if (imageUrl) {
+                imgContainer.classList.remove('hidden');
+                document.getElementById('text-reference-image').src = imageUrl;
+            } else {
+                imgContainer.classList.add('hidden');
+            }
+            
+            showView('text');
+            setTimeout(() => textInput.focus(), 100);
+        }
+
+        document.getElementById('submit-text-btn').addEventListener('click', () => {
+            const text = document.getElementById('text-input').value.trim();
+            if (text) {
+                submitTurn('text', text);
+            } else {
+                const textInput = document.getElementById('text-input');
+                textInput.classList.add('translate-x-2');
+                setTimeout(() => textInput.classList.remove('translate-x-2'), 100);
+            }
+        });
+
+        // --- DRAW ACTION LOGIC ---
+        const canvas = document.getElementById('drawing-canvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+        
+        let isDrawing = false;
+        let currentColor = '#000000';
+        let currentSize = 15;
+
+        const colors = ['#000000', '#FFFFFF', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#8B4513'];
+        
+        const paletteContainer = document.getElementById('color-palette');
+        colors.forEach((color, i) => {
+            const btn = document.createElement('button');
+            btn.className = `color-btn ${i === 0 ? 'selected' : ''}`;
+            btn.style.backgroundColor = color;
+            if (color === '#FFFFFF') btn.style.border = '2px solid #e5e7eb';
+            
+            btn.onclick = () => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('selected'));
+                btn.classList.add('selected');
+                currentColor = color;
+                if(color === '#FFFFFF') btn.style.borderColor = '#374151';
+                else btn.style.border = '3px solid #374151';
+            };
+            paletteContainer.appendChild(btn);
+        });
+
+        document.querySelectorAll('.size-btn').forEach(btn => {
+            btn.onclick = (e) => {
+                document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('ring-2', 'ring-indigo-500'));
+                const target = e.currentTarget;
+                target.classList.add('ring-2', 'ring-indigo-500');
+                currentSize = parseInt(target.dataset.size);
+            }
+        });
+
+        function resizeCanvas() {
+            const rect = container.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            clearCanvas();
+        }
+
+        window.addEventListener('resize', () => {
+            if (views.draw.classList.contains('active')) {
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width;
+                tempCanvas.height = canvas.height;
+                tempCanvas.getContext('2d').drawImage(canvas, 0, 0);
+                resizeCanvas();
+                ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, 0, 0, canvas.width, canvas.height);
+            }
+        });
+
+        function clearCanvas() {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        document.getElementById('clear-canvas-btn').onclick = clearCanvas;
+
+        function prepareDrawAction(prompt) {
+            document.getElementById('draw-prompt-text').textContent = prompt;
+            showView('draw');
+            
+            setTimeout(() => {
+                resizeCanvas();
+                clearCanvas();
+            }, 50);
+        }
+
+        document.getElementById('submit-draw-btn').addEventListener('click', () => {
+            // Encode as JPEG at 0.5 quality to ensure WebRTC network efficiency 
+            const dataURL = canvas.toDataURL('image/jpeg', 0.5); 
+            submitTurn('draw', dataURL);
+        });
+
+        // Drawing Event Listeners
+        function getCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+        }
+
+        function startPosition(e) {
+            if(e.type.startsWith('touch')) e.preventDefault();
+            isDrawing = true;
+            draw(e);
+        }
+
+        function endPosition() {
+            isDrawing = false;
+            ctx.beginPath();
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            if(e.type.startsWith('touch')) e.preventDefault();
+            
+            const pos = getCoords(e);
+            ctx.lineWidth = currentSize;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = currentColor;
+
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(pos.x, pos.y);
+        }
+
+        canvas.addEventListener('mousedown', startPosition);
+        canvas.addEventListener('mouseup', endPosition);
+        canvas.addEventListener('mousemove', draw);
+        canvas.addEventListener('mouseleave', endPosition);
+        canvas.addEventListener('touchstart', startPosition, {passive: false});
+        canvas.addEventListener('touchend', endPosition);
+        canvas.addEventListener('touchmove', draw, {passive: false});
+        canvas.addEventListener('touchcancel', endPosition);
+
+        // --- GALLERY LOGIC ---
+
+        function renderAlbum(index) {
+            const chain = gameChains[index];
+            const originalAuthor = chain[0].author;
+            document.getElementById('album-title').textContent = `${originalAuthor}'s Album`;
+            
+            const albumContent = document.getElementById('album-content');
+            albumContent.innerHTML = '';
+
+            chain.forEach((item, idx) => {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'flex flex-col items-center bg-gray-50 rounded-2xl p-4 md:p-6 shadow-md border border-gray-200 relative animate-pop';
+                wrapper.style.animationDelay = `${idx * 0.15}s`;
+                wrapper.style.opacity = '0';
+
+                const authorTag = document.createElement('div');
+                authorTag.className = 'absolute -top-4 left-1/2 transform -translate-x-1/2 bg-indigo-500 text-white px-4 py-1 rounded-full font-bold text-sm shadow-md whitespace-nowrap';
+                authorTag.textContent = `${item.author} ${item.type === 'text' ? 'wrote' : 'drew'}:`;
+                wrapper.appendChild(authorTag);
+
+                if (item.type === 'text') {
+                    const txt = document.createElement('p');
+                    txt.className = 'text-2xl md:text-3xl font-bold text-center mt-2 text-gray-800 break-words w-full';
+                    txt.textContent = `"${item.content}"`;
+                    wrapper.appendChild(txt);
+                } else if (item.type === 'draw') {
+                    const img = document.createElement('img');
+                    img.src = item.content;
+                    img.className = 'w-full max-w-sm rounded-xl border-4 border-white shadow-sm mt-2 bg-white';
+                    wrapper.appendChild(img);
+                }
+
+                albumContent.appendChild(wrapper);
+
+                if (idx < chain.length - 1) {
+                    const arrow = document.createElement('div');
+                    arrow.className = 'text-gray-300 text-4xl my-4 text-center animate-pop';
+                    arrow.style.animationDelay = `${(idx * 0.15) + 0.07}s`;
+                    arrow.style.opacity = '0';
+                    arrow.innerHTML = '⬇️';
+                    albumContent.appendChild(arrow);
+                }
+            });
+
+            // Adjust host controls vs client view
+            const prevBtn = document.getElementById('prev-album-btn');
+            const nextBtn = document.getElementById('next-album-btn');
+            
+            if (isHost) {
+                document.getElementById('gallery-controls').classList.remove('hidden');
+                document.getElementById('gallery-wait').classList.add('hidden');
+                
+                if (index === 0) prevBtn.classList.add('invisible');
+                else prevBtn.classList.remove('invisible');
+
+                if (index === players.length - 1) {
+                    nextBtn.textContent = "Back to Lobby";
+                    nextBtn.classList.replace('bg-indigo-500', 'bg-green-500');
+                    nextBtn.classList.replace('hover:bg-indigo-400', 'hover:bg-green-400');
+                    nextBtn.classList.replace('shadow-[0_4px_0_#3730a3]', 'shadow-[0_4px_0_#166534]');
+                } else {
+                    nextBtn.textContent = "Next Album";
+                    nextBtn.classList.replace('bg-green-500', 'bg-indigo-500');
+                    nextBtn.classList.replace('hover:bg-green-400', 'hover:bg-indigo-400');
+                    nextBtn.classList.replace('shadow-[0_4px_0_#166534]', 'shadow-[0_4px_0_#3730a3]');
+                }
+            } else {
+                document.getElementById('gallery-controls').classList.add('hidden');
+                document.getElementById('gallery-wait').classList.remove('hidden');
+            }
+
+            document.getElementById('gallery-scroll').scrollTop = 0;
+        }
+
+        document.getElementById('prev-album-btn').addEventListener('click', () => {
+            if (isHost && currentViewingAlbum > 0) {
+                currentViewingAlbum--;
+                renderAlbum(currentViewingAlbum);
+                broadcast({ type: 'show_album', index: currentViewingAlbum });
+            }
+        });
+
+        document.getElementById('next-album-btn').addEventListener('click', () => {
+            if (!isHost) return;
+            
+            if (currentViewingAlbum < players.length - 1) {
+                currentViewingAlbum++;
+                renderAlbum(currentViewingAlbum);
+                broadcast({ type: 'show_album', index: currentViewingAlbum });
+            } else {
+                broadcast({ type: 'back_to_lobby' });
+                showView('lobby');
+            }
+        });
+
+    </script>
 </body>
 </html>
