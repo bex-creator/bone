@@ -83,19 +83,21 @@
             -webkit-overflow-scrolling: touch;
         }
     </style>
+    <!-- Add PeerJS for WebRTC Peer-to-Peer networking -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
 
     <!-- 1. SETUP VIEW -->
     <div id="view-setup" class="view active items-center justify-center animate-pop text-center">
         <h1 class="text-5xl font-bold mb-2 text-yellow-300 drop-shadow-md">Sketch & Guess</h1>
-        <p class="text-indigo-100 mb-8 font-semibold">Online Multiplayer Sandbox!</p>
+        <p class="text-indigo-100 mb-8 font-semibold">Online Multiplayer via WebRTC!</p>
 
         <div class="bg-white/10 backdrop-blur-md p-6 rounded-3xl w-full max-w-md shadow-xl border border-white/20">
             <input type="text" id="player-name-input" placeholder="Your Name" class="w-full mb-4 px-4 py-3 rounded-xl text-gray-800 font-semibold focus:outline-none focus:ring-4 focus:ring-yellow-300" autocomplete="off" maxlength="15">
             
-            <button id="create-room-btn" disabled class="w-full bg-indigo-500 hover:bg-indigo-400 disabled:bg-indigo-900/40 text-white font-bold text-xl px-6 py-4 rounded-xl shadow-[0_6px_0_#3730a3] disabled:shadow-none btn mb-6">
-                Connecting to Network...
+            <button id="create-room-btn" class="w-full bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xl px-6 py-4 rounded-xl shadow-[0_6px_0_#3730a3] btn mb-6">
+                Host New Game
             </button>
 
             <div class="relative flex items-center py-2 mb-4">
@@ -106,10 +108,10 @@
 
             <div class="flex gap-2">
                 <input type="text" id="room-code-input" placeholder="Room Code" class="flex-1 px-4 py-3 rounded-xl text-gray-800 font-bold uppercase tracking-widest focus:outline-none focus:ring-4 focus:ring-yellow-300" autocomplete="off" maxlength="5">
-                <button id="join-room-btn" disabled class="bg-yellow-400 hover:bg-yellow-300 disabled:bg-yellow-900/40 text-yellow-900 font-bold px-6 py-3 rounded-xl shadow-[0_6px_0_#b45309] disabled:shadow-none btn">Join</button>
+                <button id="join-room-btn" class="bg-yellow-400 hover:bg-yellow-300 text-yellow-900 font-bold px-6 py-3 rounded-xl shadow-[0_6px_0_#b45309] btn">Join</button>
             </div>
             
-            <p id="connection-status" class="text-yellow-300 font-bold mt-4 h-6">Authenticating...</p>
+            <p id="connection-status" class="text-yellow-300 font-bold mt-4 h-6"></p>
         </div>
     </div>
 
@@ -222,39 +224,28 @@
         </div>
     </div>
 
-    <!-- Firebase Scripts Import -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <script>
+        /**
+         * ONLINE MULTIPLAYER TELEPHONE (WEBRTC P2P)
+         */
 
         // --- GLOBAL NETWORK & GAME STATE ---
-        let db = null;
-        let auth = null;
+        let peer = null;
         let myId = null;
         let myName = "";
         let isHost = false;
-        let currentRoomCode = "";
         
         // Client variables
+        let hostConn = null;
         let currentChainId = 0;
-        let roomUnsubscribe = null;
-        let submissionsUnsubscribe = null;
         
-        // General Game Data
+        // Host variables
+        let clients = {}; // { peerId: { conn: object, name: string } }
         let players = []; // [ { id, name } ]
         let gameChains = []; // [ [ { author, type, content } ] ]
         let currentTurn = 0;
         let submissionsThisTurn = 0;
         let currentViewingAlbum = 0;
-
-        // Firebase configs provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'sketch-guess-app';
-        const firebaseConfig = JSON.parse(__firebase_config);
-        
-        const app = initializeApp(firebaseConfig);
-        auth = getAuth(app);
-        db = getFirestore(app);
 
         // --- DOM ELEMENTS ---
         const views = {
@@ -278,7 +269,7 @@
             return Math.random().toString(36).substring(2, 7).toUpperCase();
         }
 
-        window.copyRoomCode = function() {
+        function copyRoomCode() {
             const el = document.getElementById('lobby-room-code');
             const code = el.innerText;
             if (code === "COPIED!") return;
@@ -297,262 +288,208 @@
             document.body.removeChild(textArea);
         }
 
-        // --- AUTH & INITIALIZATION ---
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (err) {
-                console.error("Auth error:", err);
-                statusText.textContent = "Auth connection failed. Retrying...";
-            }
-        };
+        // --- NETWORK INITIALIZATION ---
 
-        onAuthStateChanged(auth, (user) => {
-            if (user) {
-                myId = user.uid;
-                statusText.textContent = "Online & Ready!";
-                document.getElementById('create-room-btn').disabled = false;
-                document.getElementById('join-room-btn').disabled = false;
-                document.getElementById('create-room-btn').textContent = "Host New Game";
-            }
-        });
-
-        // Trigger auth immediately on load
-        initAuth();
-
-        // --- HOST / LOBBY ACTIONS ---
-
-        document.getElementById('create-room-btn').addEventListener('click', async () => {
-            if (!auth.currentUser) return;
+        document.getElementById('create-room-btn').addEventListener('click', () => {
             myName = document.getElementById('player-name-input').value.trim() || 'Host';
             isHost = true;
             statusText.textContent = "Creating room...";
             
-            const roomCode = generateRoomCode();
-            currentRoomCode = roomCode;
+            const code = generateRoomCode();
+            peer = new Peer(code);
 
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode);
-            try {
-                await setDoc(roomRef, {
-                    hostId: myId,
-                    players: [{ id: myId, name: myName }],
-                    status: 'lobby',
-                    currentTurn: 0,
-                    currentViewingAlbum: 0,
-                    chains: []
-                });
-
-                document.getElementById('lobby-room-code').innerText = roomCode;
-                listenToRoom(roomCode);
+            peer.on('open', (id) => {
+                myId = id;
+                players = [{ id: myId, name: myName }];
+                document.getElementById('lobby-room-code').innerText = id;
+                updateLobbyUI();
                 showView('lobby');
-            } catch (err) {
-                console.error("Error creating room:", err);
-                statusText.textContent = "Failed to create room.";
-            }
+            });
+
+            peer.on('connection', (conn) => {
+                conn.on('open', () => {
+                    clients[conn.peer] = { conn: conn, name: 'Joining...' };
+                });
+                conn.on('data', (data) => handleHostData(conn.peer, data));
+                conn.on('close', () => {
+                    players = players.filter(p => p.id !== conn.peer);
+                    delete clients[conn.peer];
+                    broadcast({ type: 'lobby_update', players });
+                    updateLobbyUI();
+                });
+            });
+
+            peer.on('error', (err) => {
+                if (err.type === 'unavailable-id') {
+                    peer.destroy();
+                    statusText.textContent = "Code collision. Try again.";
+                } else {
+                    statusText.textContent = "Error: " + err.message;
+                }
+            });
         });
 
-        document.getElementById('join-room-btn').addEventListener('click', async () => {
-            if (!auth.currentUser) return;
+        document.getElementById('join-room-btn').addEventListener('click', () => {
             myName = document.getElementById('player-name-input').value.trim() || 'Player';
             const roomCode = document.getElementById('room-code-input').value.trim().toUpperCase();
             if (!roomCode) return;
             
             isHost = false;
             statusText.textContent = "Connecting to room...";
-            currentRoomCode = roomCode;
-
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode);
-            try {
-                const roomSnap = await getDoc(roomRef);
-                if (!roomSnap.exists()) {
-                    statusText.textContent = "Room not found.";
-                    return;
-                }
-
-                const data = roomSnap.data();
-                if (data.status !== 'lobby') {
-                    statusText.textContent = "Game already started.";
-                    return;
-                }
-
-                const updatedPlayers = [...data.players, { id: myId, name: myName }];
-                await updateDoc(roomRef, { players: updatedPlayers });
-
-                document.getElementById('lobby-room-code').innerText = roomCode;
-                listenToRoom(roomCode);
-                showView('lobby');
-            } catch (err) {
-                console.error("Error joining room:", err);
-                statusText.textContent = "Failed to join room.";
-            }
-        });
-
-        // --- REALTIME SYNC ENGINE ---
-
-        function listenToRoom(roomCode) {
-            if (roomUnsubscribe) roomUnsubscribe();
-            if (submissionsUnsubscribe) submissionsUnsubscribe();
-
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode);
-            roomUnsubscribe = onSnapshot(roomRef, (snapshot) => {
-                if (!snapshot.exists()) {
-                    alert("Room has been disbanded.");
-                    window.location.reload();
-                    return;
-                }
-
-                const data = snapshot.data();
-                players = data.players;
-                currentTurn = data.currentTurn;
-                currentViewingAlbum = data.currentViewingAlbum;
-                gameChains = data.chains;
-
-                updateLobbyUI();
-
-                // State Machine handling
-                if (data.status === 'playing') {
-                    // Start next turn or handle gameplay
-                    const myIdx = players.findIndex(p => p.id === myId);
-                    const chainId = (myIdx + currentTurn) % players.length;
-                    
-                    if (currentTurn === 0) {
-                        // Let's check if we already submitted
-                        checkSubmissionAndRender(roomCode, chainId, 0, () => {
-                            prepareTextAction('Write a secret prompt for someone to draw:', null);
-                        });
-                    } else {
-                        // Load previous item from chain
-                        const chain = gameChains[chainId];
-                        const prevItem = chain[chain.length - 1];
-
-                        checkSubmissionAndRender(roomCode, chainId, currentTurn, () => {
-                            if (prevItem.type === 'text') {
-                                prepareDrawAction(prevItem.content);
-                            } else {
-                                prepareTextAction("What is this a drawing of?", prevItem.content);
-                            }
-                        });
-                    }
-                } else if (data.status === 'waiting') {
-                    showView('waiting');
-                } else if (data.status === 'gallery') {
-                    renderAlbum(currentViewingAlbum);
-                    showView('gallery');
-                } else if (data.status === 'lobby' && views.gallery.classList.contains('active')) {
-                    // Redirect back to lobby if host restarts
+            
+            peer = new Peer();
+            peer.on('open', (id) => {
+                myId = id;
+                hostConn = peer.connect(roomCode);
+                
+                hostConn.on('open', () => {
+                    document.getElementById('lobby-room-code').innerText = roomCode;
+                    hostConn.send({ type: 'join', name: myName });
                     showView('lobby');
-                }
-            }, (error) => {
-                console.error("Room listener error: ", error);
-            });
-
-            // Monitor Submissions for Host-only aggregation
-            const submissionsRef = collection(db, 'artifacts', appId, 'public', 'data', 'submissions');
-            submissionsUnsubscribe = onSnapshot(submissionsRef, (snapshot) => {
-                // In-memory filter on roomCode to comply with Rule 2 (No complex multi-condition queries)
-                const roomSubs = snapshot.docs
-                    .map(doc => ({ id: doc.id, ...doc.data() }))
-                    .filter(item => item.roomCode === roomCode && item.turn === currentTurn);
-
-                submissionsThisTurn = roomSubs.length;
-                updateWaitingUI(submissionsThisTurn, players.length);
-
-                if (isHost && roomSubs.length === players.length && players.length > 0) {
-                    processSubmissions(roomSubs);
-                }
-            }, (error) => {
-                console.error("Submissions listener error: ", error);
-            });
-        }
-
-        async function checkSubmissionAndRender(roomCode, chainId, turn, renderCallback) {
-            // Check if player has already submitted for this turn to prevent view resets on page updates
-            const subRef = doc(db, 'artifacts', appId, 'public', 'data', 'submissions', `${roomCode}_${myId}_${turn}`);
-            const snap = await getDoc(subRef);
-            if (snap.exists()) {
-                showView('waiting');
-            } else {
-                renderCallback();
-            }
-        }
-
-        // --- SUBMISSION STORAGE ---
-
-        async function submitTurn(type, content) {
-            showView('waiting');
-            const myIdx = players.findIndex(p => p.id === myId);
-            const chainId = (myIdx + currentTurn) % players.length;
-
-            const subRef = doc(db, 'artifacts', appId, 'public', 'data', 'submissions', `${currentRoomCode}_${myId}_${currentTurn}`);
-            await setDoc(subRef, {
-                roomCode: currentRoomCode,
-                playerId: myId,
-                author: myName,
-                chainId: chainId,
-                turn: currentTurn,
-                type: type,
-                content: content
-            });
-        }
-
-        // --- HOST PROGRESSION CONTROLLER ---
-
-        async function processSubmissions(submissions) {
-            // Append submissions to appropriate chains
-            let newChains = [...gameChains];
-            if (currentTurn === 0) {
-                newChains = players.map(() => []);
-            }
-
-            submissions.forEach(sub => {
-                newChains[sub.chainId].push({
-                    author: sub.author,
-                    type: sub.type,
-                    content: sub.content
+                });
+                
+                hostConn.on('data', handleClientData);
+                
+                hostConn.on('close', () => {
+                    alert("Disconnected from host.");
+                    window.location.reload();
                 });
             });
 
-            const nextTurn = currentTurn + 1;
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode);
-
-            if (nextTurn >= players.length) {
-                // End game, move to gallery
-                await updateDoc(roomRef, {
-                    status: 'gallery',
-                    chains: newChains,
-                    currentViewingAlbum: 0
-                });
-            } else {
-                // Advance turn index
-                await updateDoc(roomRef, {
-                    currentTurn: nextTurn,
-                    chains: newChains
-                });
-            }
-
-            // Cleanup the temporary submissions docs to save space
-            const batch = writeBatch(db);
-            submissions.forEach(sub => {
-                batch.delete(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', sub.id));
-            });
-            await batch.commit();
-        }
-
-        document.getElementById('start-game-btn').addEventListener('click', async () => {
-            if (players.length < 2) return;
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode);
-            await updateDoc(roomRef, {
-                status: 'playing',
-                currentTurn: 0,
-                chains: players.map(() => [])
+            peer.on('error', (err) => {
+                statusText.textContent = "Error: Could not connect to room.";
             });
         });
 
-        // --- UI DRAW ENGINE & CONTROLLER HANDLERS ---
+        // --- HOST LOGIC ---
+
+        function handleHostData(peerId, data) {
+            if (data.type === 'join') {
+                clients[peerId].name = data.name;
+                players.push({ id: peerId, name: data.name });
+                broadcast({ type: 'lobby_update', players });
+                updateLobbyUI();
+            }
+            if (data.type === 'submit_turn') {
+                gameChains[data.chainId].push({
+                    author: players.find(p => p.id === peerId).name,
+                    type: data.turnType,
+                    content: data.content
+                });
+                submissionsThisTurn++;
+                broadcast({ type: 'wait_update', count: submissionsThisTurn, total: players.length });
+                updateWaitingUI(submissionsThisTurn, players.length);
+                
+                if (submissionsThisTurn === players.length) {
+                    advanceTurn();
+                }
+            }
+        }
+
+        function broadcast(msg) {
+            Object.values(clients).forEach(c => {
+                if (c.conn.open) c.conn.send(msg);
+            });
+        }
+
+        document.getElementById('start-game-btn').addEventListener('click', () => {
+            if(players.length < 2) return; // Need at least 2
+            
+            gameChains = players.map(() => []);
+            currentTurn = 0;
+            submissionsThisTurn = 0;
+            
+            players.forEach((p, idx) => {
+                let msg = { 
+                    type: 'start_turn', 
+                    chainId: idx, 
+                    turnType: 'text', 
+                    instruction: 'Write a secret prompt for someone to draw:',
+                    reference: null
+                };
+                if (p.id === myId) handleClientData(msg); // host's own client handler
+                else clients[p.id].conn.send(msg);
+            });
+        });
+
+        function advanceTurn() {
+            currentTurn++;
+            submissionsThisTurn = 0;
+            
+            if (currentTurn >= players.length) {
+                // Game Over!
+                broadcast({ type: 'game_over', chains: gameChains });
+                currentViewingAlbum = 0;
+                showView('gallery');
+                renderAlbum(0);
+                broadcast({ type: 'show_album', index: 0 });
+                return;
+            }
+            
+            broadcast({ type: 'wait_update', count: 0, total: players.length });
+            updateWaitingUI(0, players.length);
+            
+            // Assign next tasks simultaneously 
+            players.forEach((p, idx) => {
+                const chainId = (idx + currentTurn) % players.length;
+                const chain = gameChains[chainId];
+                const prevItem = chain[chain.length - 1];
+                
+                let msg = { type: 'start_turn', chainId: chainId };
+                if (prevItem.type === 'text') {
+                    msg.turnType = 'draw';
+                    msg.instruction = prevItem.content;
+                } else {
+                    msg.turnType = 'text';
+                    msg.instruction = "What is this a drawing of?";
+                    msg.reference = prevItem.content;
+                }
+                
+                if (p.id === myId) handleClientData(msg);
+                else clients[p.id].conn.send(msg);
+            });
+        }
+
+        // --- CLIENT LOGIC ---
+
+        function handleClientData(data) {
+            if (data.type === 'lobby_update') {
+                players = data.players;
+                updateLobbyUI();
+            }
+            if (data.type === 'start_turn') {
+                currentChainId = data.chainId;
+                if (data.turnType === 'text') {
+                    prepareTextAction(data.instruction, data.reference);
+                } else {
+                    prepareDrawAction(data.instruction);
+                }
+            }
+            if (data.type === 'wait_update') {
+                updateWaitingUI(data.count, data.total);
+            }
+            if (data.type === 'game_over') {
+                gameChains = data.chains;
+                showView('waiting');
+                document.getElementById('wait-text').textContent = "Host is preparing the gallery...";
+            }
+            if (data.type === 'show_album') {
+                renderAlbum(data.index);
+                showView('gallery');
+            }
+            if (data.type === 'back_to_lobby') {
+                showView('lobby');
+            }
+        }
+
+        function submitTurn(type, content) {
+            showView('waiting');
+            let msg = { type: 'submit_turn', chainId: currentChainId, turnType: type, content: content };
+            if (isHost) handleHostData(myId, msg);
+            else hostConn.send(msg);
+        }
+
+        // --- UI UPDATES ---
 
         function updateLobbyUI() {
             const list = document.getElementById('player-list');
@@ -600,10 +537,10 @@
             setTimeout(() => textInput.focus(), 100);
         }
 
-        document.getElementById('submit-text-btn').addEventListener('click', async () => {
+        document.getElementById('submit-text-btn').addEventListener('click', () => {
             const text = document.getElementById('text-input').value.trim();
             if (text) {
-                await submitTurn('text', text);
+                submitTurn('text', text);
             } else {
                 const textInput = document.getElementById('text-input');
                 textInput.classList.add('translate-x-2');
@@ -683,10 +620,10 @@
             }, 50);
         }
 
-        document.getElementById('submit-draw-btn').addEventListener('click', async () => {
-            // Encode drawing to lightweight format to limit Firestore storage space
-            const dataURL = canvas.toDataURL('image/jpeg', 0.4); 
-            await submitTurn('draw', dataURL);
+        document.getElementById('submit-draw-btn').addEventListener('click', () => {
+            // Encode as JPEG at 0.5 quality to ensure WebRTC network efficiency 
+            const dataURL = canvas.toDataURL('image/jpeg', 0.5); 
+            submitTurn('draw', dataURL);
         });
 
         // Drawing Event Listeners
@@ -739,7 +676,6 @@
 
         function renderAlbum(index) {
             const chain = gameChains[index];
-            if (!chain || chain.length === 0) return;
             const originalAuthor = chain[0].author;
             document.getElementById('album-title').textContent = `${originalAuthor}'s Album`;
             
@@ -811,24 +747,24 @@
             document.getElementById('gallery-scroll').scrollTop = 0;
         }
 
-        document.getElementById('prev-album-btn').addEventListener('click', async () => {
+        document.getElementById('prev-album-btn').addEventListener('click', () => {
             if (isHost && currentViewingAlbum > 0) {
-                const prevIndex = currentViewingAlbum - 1;
-                const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode);
-                await updateDoc(roomRef, { currentViewingAlbum: prevIndex });
+                currentViewingAlbum--;
+                renderAlbum(currentViewingAlbum);
+                broadcast({ type: 'show_album', index: currentViewingAlbum });
             }
         });
 
-        document.getElementById('next-album-btn').addEventListener('click', async () => {
+        document.getElementById('next-album-btn').addEventListener('click', () => {
             if (!isHost) return;
             
-            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode);
             if (currentViewingAlbum < players.length - 1) {
-                const nextIndex = currentViewingAlbum + 1;
-                await updateDoc(roomRef, { currentViewingAlbum: nextIndex });
+                currentViewingAlbum++;
+                renderAlbum(currentViewingAlbum);
+                broadcast({ type: 'show_album', index: currentViewingAlbum });
             } else {
-                // Return to Lobby
-                await updateDoc(roomRef, { status: 'lobby' });
+                broadcast({ type: 'back_to_lobby' });
+                showView('lobby');
             }
         });
 
